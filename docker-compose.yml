@@ -1,0 +1,58 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+#  Staff Scheduling System – Docker Compose
+#  Architecture: Vertical Slicing / FastAPI
+# ─────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL 15 ──────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: sched_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-sched_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB:       ${POSTGRES_DB:-sched_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sched_user} -d ${POSTGRES_DB:-sched_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sched_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sched_user}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-sched_db}
+      SECRET_KEY:   ${SECRET_KEY:-super-secret-dev-key-change-in-prod}
+      APP_ENV:      ${APP_ENV:-development}
+      LOG_LEVEL:    ${LOG_LEVEL:-info}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app               # hot-reload in dev
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      uvicorn app.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --log-level ${LOG_LEVEL:-info}
+
+volumes:
+  postgres_data:
