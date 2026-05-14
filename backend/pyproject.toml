@@ -1,0 +1,278 @@
+# =============================================================================
+#  backend/pyproject.toml — Staff Scheduling System
+#
+#  This file is the single configuration hub for:
+#    • Project metadata (PEP 621)
+#    • pytest       — test runner (Testing Pyramid)
+#    • coverage.py  — test coverage enforcement
+#    • ruff         — linting + import sorting (Refinement Loop)
+#    • black        — formatting
+#    • mypy         — static type checking (Information Hiding enforcement)
+#    • isort        — (delegated to ruff; kept here as a ruff alias config)
+#
+#  Architectural Note
+#  ──────────────────
+#  mypy's strict settings directly enforce the Information Hiding constraint:
+#  any layer that imports from a prohibited layer will produce a type error
+#  if the imported symbol is not in that layer's public __all__.
+# =============================================================================
+
+# ── Project Metadata (PEP 621) ─────────────────────────────────────────────
+[project]
+name            = "staff-scheduling-system"
+version         = "0.1.0"
+description     = "University engineering project — FastAPI staff scheduler"
+requires-python = ">=3.11"
+license         = { text = "MIT" }
+
+authors = [
+  { name = "Engineering Team", email = "team@university.edu" },
+]
+
+keywords = ["fastapi", "scheduling", "postgresql", "vertical-slicing"]
+
+# Runtime deps kept minimal — full list in requirements.txt
+dependencies = [
+  "fastapi>=0.111,<0.112",
+  "sqlalchemy>=2.0,<2.1",
+  "pydantic>=2.7,<2.8",
+  "pydantic-settings>=2.2,<2.3",
+]
+
+# =============================================================================
+#  BUILD SYSTEM
+# =============================================================================
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+#  PYTEST — Testing Pyramid Configuration
+#
+#  Pyramid ratios enforced via marker + coverage:
+#    Unit        (70 %)  — tests/unit/        pure functions, no I/O
+#    Integration (20 %)  — tests/integration/  real DB session, TestClient
+#    E2E         (10 %)  — tests/e2e/ + e2e/   Playwright, full HTTP stack
+#
+#  Run subsets:
+#    pytest -m unit           # 70 % layer only
+#    pytest -m integration    # 20 % layer only
+#    pytest -m e2e            # 10 % layer only
+#    pytest -m "not e2e"      # all except browser tests (fast CI gate)
+# =============================================================================
+[tool.pytest.ini_options]
+
+# ── Discovery ─────────────────────────────────────────────────────────────────
+# testpaths covers both the pytest-managed unit/integration suite AND the
+# Playwright E2E suite so a single `pytest` invocation runs everything.
+testpaths    = ["tests", "e2e"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# ── Python path ───────────────────────────────────────────────────────────────
+# Adds backend/ to sys.path so `from app.xxx import yyy` resolves without
+# needing an editable install. Mirrors how uvicorn resolves the module.
+pythonpath = ["."]              # relative to pyproject.toml location (backend/)
+
+# ── Async mode ────────────────────────────────────────────────────────────────
+# "auto" wraps every async def test_* without requiring @pytest.mark.asyncio.
+# Required for httpx.AsyncClient and Playwright's async API.
+asyncio_mode = "auto"
+
+# ── Markers (Testing Pyramid) ──────────────────────────────────────────────────
+markers = [
+  "unit:        Pure function tests — zero I/O, zero DB (70 % target)",
+  "integration: DB session + TestClient tests — real SQLite (20 % target)",
+  "e2e:         Playwright browser tests — full HTTP stack (10 % target)",
+  "padlock:     Boundary/threshold validator tests (subset of unit)",
+  "slow:        Tests taking > 2 s — excluded from fast feedback loops",
+]
+
+# ── Default CLI flags ──────────────────────────────────────────────────────────
+# -v          : verbose output (shows each test name)
+# --tb=short  : compact tracebacks (full available with --tb=long)
+# --strict-markers : fail if an unregistered marker is used (typo guard)
+# -p no:warnings   : suppress deprecation noise during development
+addopts = """
+  -v
+  --tb=short
+  --strict-markers
+  -p no:warnings
+"""
+
+# ── Filtering (suppress known benign warnings) ─────────────────────────────────
+filterwarnings = [
+  "ignore::DeprecationWarning",
+  "ignore::PendingDeprecationWarning",
+  "ignore:.*passlib.*:DeprecationWarning",
+]
+
+# =============================================================================
+#  COVERAGE.PY — Enforcement Thresholds
+#
+#  Padlock constraint: the CI pipeline must fail if overall branch coverage
+#  drops below 80 %.  Individual module floors prevent "coverage washing"
+#  (a high-coverage test file masking an untested service).
+#
+#  Run: pytest --cov=app --cov-report=html --cov-report=term-missing
+# =============================================================================
+[tool.coverage.run]
+source          = ["app"]
+branch          = true          # branch coverage (not just line coverage)
+omit = [
+  "app/main.py",                # lifespan wiring — tested via E2E
+  "app/database.py",            # DI plumbing — tested via integration
+  "**/__init__.py",
+  "**/migrations/*",
+  "**/alembic/*",
+]
+
+[tool.coverage.report]
+show_missing          = true
+skip_covered          = false
+precision             = 2
+
+# ── Per-module coverage floors (Padlock COVERAGE-*) ──────────────────────────
+# Prevents a 95 %-covered unit module from masking a 0 %-covered service.
+fail_under            = 80      # global floor — CI gate
+
+[tool.coverage.paths]
+# Normalise paths so coverage from inside Docker matches the host report
+source = ["app", "/app"]
+
+# =============================================================================
+#  RUFF — Linting + Import Sorting (Refinement Loop)
+#
+#  Ruff replaces: flake8, isort, pyupgrade, pep8-naming, flake8-bugbear.
+#  Run: ruff check .           # lint
+#       ruff check . --fix     # auto-fix safe violations
+#       ruff format .          # format (black-compatible)
+# =============================================================================
+[tool.ruff]
+target-version = "py311"
+line-length    = 88             # black-compatible
+src            = ["app", "tests", "e2e"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes (undefined names, unused imports)
+  "I",    # isort (import ordering)
+  "N",    # pep8-naming
+  "UP",   # pyupgrade (modernise syntax)
+  "B",    # flake8-bugbear (common bugs)
+  "C4",   # flake8-comprehensions
+  "SIM",  # flake8-simplify
+  "TCH",  # flake8-type-checking (move TYPE_CHECKING-only imports)
+  "RUF",  # ruff-specific rules
+]
+
+ignore = [
+  "E501",   # line too long — delegated to black/ruff format
+  "B008",   # do not perform function calls in default args (FastAPI Depends pattern)
+  "N805",   # first argument of class method should be named cls — Pydantic validators use cls
+  "RUF012", # mutable class attr annotation — SQLAlchemy mapped_column pattern
+]
+
+# ── Per-file overrides ─────────────────────────────────────────────────────────
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "S101",   # use of assert (expected in tests)
+  "ANN",    # missing type annotations (relaxed in tests)
+]
+"e2e/**"   = ["S101", "ANN"]
+"alembic/**" = ["ALL"]          # migration files are auto-generated
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]     # ensures app.* imports are grouped correctly
+force-sort-within-sections = true
+
+# =============================================================================
+#  BLACK — Code Formatter
+#
+#  black and ruff format share the same line-length to avoid conflicts.
+#  Run: black .
+# =============================================================================
+[tool.black]
+target-version    = ["py311"]
+line-length       = 88
+skip-string-normalization = false
+
+# Exclude auto-generated files
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | alembic/versions
+  | __pycache__
+)/
+'''
+
+# =============================================================================
+#  MYPY — Static Type Checker (Information Hiding Enforcer)
+#
+#  Strict mode is the primary tool for enforcing the Information Hiding
+#  architectural constraint. If a route handler imports a raw ORM model
+#  instead of a schema, mypy will surface the type mismatch.
+#
+#  Run: mypy app/
+# =============================================================================
+[tool.mypy]
+python_version         = "3.11"
+strict                 = true   # enables all optional error codes
+
+# ── Strictness flags (explicitly listed for documentation) ───────────────────
+warn_return_any        = true   # catches Any leaking across layer boundaries
+warn_unused_ignores    = true   # keeps # type: ignore comments honest
+disallow_untyped_defs  = true   # all public functions must have type annotations
+disallow_any_generics  = false  # allow List, Dict without params (too noisy)
+check_untyped_defs     = true
+
+# ── Plugins ───────────────────────────────────────────────────────────────────
+plugins = [
+  "sqlalchemy.ext.mypy.plugin",  # understands mapped_column, relationship types
+  "pydantic.mypy",               # understands BaseModel fields
+]
+
+# ── Pydantic mypy plugin config ───────────────────────────────────────────────
+[tool.mypy-pydantic]
+init_forbid_extra      = true
+init_typed             = true
+warn_required_dynamic_aliases = true
+
+# ── Per-module overrides (third-party stubs are incomplete) ───────────────────
+[[tool.mypy.overrides]]
+module = [
+  "passlib.*",
+  "jose.*",
+  "alembic.*",
+  "factory.*",
+  "faker.*",
+  "playwright.*",
+]
+ignore_missing_imports = true
+
+# =============================================================================
+#  HATCH — Development Environment (optional, replaces venv + pip manually)
+#
+#  hatch run dev        → uvicorn with hot-reload
+#  hatch run test       → full pytest suite with coverage
+#  hatch run lint       → ruff + mypy
+#  hatch run fmt        → black + ruff format
+# =============================================================================
+[tool.hatch.envs.default]
+dependencies = [
+  "pytest", "pytest-cov", "pytest-asyncio",
+  "httpx", "factory-boy", "faker",
+  "playwright", "pytest-playwright",
+  "ruff", "black", "mypy",
+]
+
+[tool.hatch.envs.default.scripts]
+dev   = "uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
+test  = "pytest --cov=app --cov-report=term-missing --cov-report=html {args}"
+lint  = ["ruff check .", "mypy app/"]
+fmt   = ["black .", "ruff format ."]
+ci    = ["ruff check .", "mypy app/", "pytest --cov=app --cov-fail-under=80"]

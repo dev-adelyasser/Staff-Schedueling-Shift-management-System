@@ -32,9 +32,7 @@ class User(Base):
 
     # ── Role (RBAC) ───────────────────────────────────────────
     role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="userrole", native_enum=False, length=32),
-        nullable=False,
-        default=UserRole.STAFF,
+        Enum(UserRole, name="userrole"), nullable=False, default=UserRole.STAFF
     )
 
     # ── Flags ─────────────────────────────────────────────────

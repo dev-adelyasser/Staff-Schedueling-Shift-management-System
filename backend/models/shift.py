@@ -34,7 +34,7 @@ class Shift(Base):
     title: Mapped[str]          = mapped_column(String(255), nullable=False)
     notes: Mapped[str | None]   = mapped_column(Text, nullable=True)
     status: Mapped[ShiftStatus] = mapped_column(
-        Enum(ShiftStatus, name="shiftstatus", native_enum=False, length=32),
+        Enum(ShiftStatus, name="shiftstatus"),
         nullable=False,
         default=ShiftStatus.DRAFT,
     )

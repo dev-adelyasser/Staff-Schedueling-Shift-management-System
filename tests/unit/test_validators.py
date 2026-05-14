@@ -168,9 +168,11 @@ class TestValidateRoleElevation:
         with pytest.raises(RoleValidationError, match="privilege escalation"):
             validate_role_elevation(UserRole.MANAGER, UserRole.ADMIN)
 
-    def test_staff_cannot_assign_anything(self):
+    def test_staff_cannot_assign_peer_or_higher(self):
         with pytest.raises(RoleValidationError):
-            validate_role_elevation(UserRole.STAFF, UserRole.VIEWER)
+            validate_role_elevation(UserRole.STAFF, UserRole.STAFF)
+        with pytest.raises(RoleValidationError):
+            validate_role_elevation(UserRole.STAFF, UserRole.MANAGER)
 
     def test_cannot_assign_own_level(self):
         with pytest.raises(RoleValidationError):

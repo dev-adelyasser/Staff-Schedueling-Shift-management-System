@@ -16,7 +16,31 @@ Key design decisions:
     directly, using mocks for the repository layer.
   • Each test that touches the DB runs inside a SAVEPOINT transaction that is
     rolled back after the test → perfect isolation with zero cost.
+
+──────────────────────────────────────────────────────────────────────────────
+Phase 3 addition — env var injection
+──────────────────────────────────────────────────────────────────────────────
+Settings.__init__ calls pydantic-settings at module import time via
+lru_cache.  The fields secret_key and database_url have NO defaults,
+so importing app.main in any test without them raises a ValidationError
+before a single test even runs.
+
+Fix: inject sentinel values into os.environ HERE, at the top of this file.
+This file is the first thing pytest loads, so the values are present before
+any `from app.*` import anywhere in the test suite.
+
+These are NOT real credentials — they exist only to satisfy Pydantic's
+required-field validation during testing.  Real values live in .env (never
+committed to git).
 """
+
+# ── MUST be the very first executable lines — before any app import ──────────
+import os
+
+os.environ.setdefault("SECRET_KEY", "ci-test-secret-key-not-for-production")
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
+os.environ.setdefault("APP_ENV", "testing")
+# ─────────────────────────────────────────────────────────────────────────────
 
 import pytest
 from sqlalchemy import create_engine, event

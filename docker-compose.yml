@@ -1,58 +1,156 @@
+# =============================================================================
+#  Staff Scheduling System — docker-compose.yml
+#  Architecture : Vertical Slicing / FastAPI / PostgreSQL 15
+#  Principle    : Information Hiding — no internal logic is exposed here;
+#                 only service wiring, ports, and env-var references.
+#
+#  Services
+#  ────────
+#  db       → PostgreSQL 15-alpine   (persistent volume, health-checked)
+#  backend  → FastAPI / Uvicorn      (depends_on db healthy, hot-reload in dev)
+#
+#  Secrets Strategy
+#  ────────────────
+#  ALL secret values are read from a .env file (never hard-coded).
+#  Copy .env.example → .env and populate before first run.
+#  In CI/CD inject secrets via the platform's secret store, not .env files.
+#
+#  Quick Start
+#  ───────────
+#  cp .env.example .env          # populate secrets
+#  docker compose up --build     # first run (builds backend image)
+#  docker compose up -d          # subsequent runs (detached)
+#  docker compose down -v        # stop + wipe volumes (nuclear reset)
+# =============================================================================
+
 version: "3.9"
 
-# ─────────────────────────────────────────────
-#  Staff Scheduling System – Docker Compose
-#  Architecture: Vertical Slicing / FastAPI
-# ─────────────────────────────────────────────
+# ── Shared network (services discover each other by service name) ─────────────
+networks:
+  sched_net:
+    driver: bridge
 
+# ── Named volumes (data survives container restarts) ──────────────────────────
+volumes:
+  postgres_data:        # PostgreSQL WAL + table data
+  postgres_backups:     # future: pg_dump cron target
+
+# =============================================================================
+#  SERVICES
+# =============================================================================
 services:
 
-  # ── PostgreSQL 15 ──────────────────────────
+  # ── db ───────────────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
     container_name: sched_db
     restart: unless-stopped
+    networks:
+      - sched_net
+
+    # All values resolved from .env — zero hard-coded secrets
     environment:
-      POSTGRES_USER:     ${POSTGRES_USER:-sched_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB:       ${POSTGRES_DB:-sched_db}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+
+      # Performance tuning (safe defaults; override in .env for production)
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - postgres_backups:/backups
+      # Mount optional init scripts (schema seeds, extensions)
+      # - ./infra/db/init:/docker-entrypoint-initdb.d:ro
+
     ports:
-      - "5432:5432"
+      # Expose only to localhost in production (remove or firewall externally)
+      - "${POSTGRES_PORT:-5432}:5432"
+
+    # ── Health check ────────────────────────────────────────────────────────
+    # backend.depends_on condition: service_healthy ensures the TCP port AND
+    # the postgres process are both ready before FastAPI attempts its first
+    # connection — eliminates the "could not connect to server" race condition.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sched_user} -d ${POSTGRES_DB:-sched_db}"]
+      test:
+        - "CMD-SHELL"
+        - "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -q"
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s   # grace period for first-time volume initialisation
 
-  # ── FastAPI Backend ────────────────────────
+  # ── backend ──────────────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Pass build-time arg so the Dockerfile can tag the image correctly
+      args:
+        BUILD_ENV: ${APP_ENV:-development}
+
     container_name: sched_backend
     restart: unless-stopped
-    env_file:
-      - .env
+    networks:
+      - sched_net
+
+    # ── Environment Variables ───────────────────────────────────────────────
+    # Composite DATABASE_URL assembled here so services only need individual
+    # credential vars in .env (avoids duplicating the connection string).
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-sched_user}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-sched_db}
-      SECRET_KEY:   ${SECRET_KEY:-super-secret-dev-key-change-in-prod}
+      # ── Database (assembled from individual .env vars) ──────────────────
+      DATABASE_URL: >-
+        postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
+
+      # ── Test DB (SQLite override injected by pytest — not used here) ─────
+      # TEST_DATABASE_URL is intentionally absent; conftest.py sets it.
+
+      # ── Application ──────────────────────────────────────────────────────
       APP_ENV:      ${APP_ENV:-development}
       LOG_LEVEL:    ${LOG_LEVEL:-info}
-    ports:
-      - "8000:8000"
+      SECRET_KEY:   ${SECRET_KEY}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+
+      # ── Feature flags ────────────────────────────────────────────────────
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+
+    # ── Volume Mounts ───────────────────────────────────────────────────────
     volumes:
-      - ./backend:/app               # hot-reload in dev
+      # Bind-mount source for hot-reload in development.
+      # In production, build a self-contained image (no bind mount).
+      - ./backend:/app
+      # Exclude the local venv from the bind-mount to avoid conflicts
+      - /app/.venv
+
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+
+    # ── Dependency Ordering ─────────────────────────────────────────────────
+    # service_healthy (not just service_started) ensures Postgres is accepting
+    # connections before SQLAlchemy engine.connect() is called on startup.
     depends_on:
       db:
         condition: service_healthy
-    command: >
-      uvicorn app.main:app
-        --host 0.0.0.0
-        --port 8000
-        --reload
-        --log-level ${LOG_LEVEL:-info}
 
-volumes:
-  postgres_data:
+    # ── Runtime Command ─────────────────────────────────────────────────────
+    # --reload  : enabled in development (APP_ENV=development)
+    # --workers : controlled by env; production should use gunicorn instead
+    command: >
+      sh -c "
+        echo '⏳ Running Alembic migrations...' &&
+        alembic upgrade head &&
+        echo '✅ Migrations complete. Starting server...' &&
+        uvicorn app.main:app
+          --host 0.0.0.0
+          --port 8000
+          --log-level ${LOG_LEVEL:-info}
+          $([ '${APP_ENV:-development}' = 'development' ] && echo '--reload' || echo '')
+      "
+
+    # ── Health check for backend ────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
