@@ -8,18 +8,25 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+# Rule 4: algorithm is fixed to HS256 — not configurable via env to prevent
+# accidental downgrade or algorithm-confusion attacks.
+_ALGORITHM = "HS256"
+
 # AU-02: passlib bcrypt 1.7.4 with explicitly 12 rounds per spec
 pwd_context = CryptContext(
-    schemes=["bcrypt"], 
+    schemes=["bcrypt"],
     deprecated="auto",
-    bcrypt__rounds=12
+    bcrypt__rounds=12,
 )
+
 
 def hash_password(plain: str) -> str:
     return pwd_context.hash(plain)
 
+
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
+
 
 def create_access_token(
     subject: str | Any,
@@ -36,8 +43,9 @@ def create_access_token(
         "iat": datetime.now(timezone.utc),
         "ver": token_version,  # HR-04 — checked in get_current_user
     }
-    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+    return jwt.encode(payload, settings.secret_key, algorithm=_ALGORITHM)
+
 
 def decode_access_token(token: str) -> dict[str, Any]:
-    """Raises JWTError if token is invalid or expired."""
-    return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    """Raises jose.JWTError on any failure: expired, bad signature, wrong algorithm."""
+    return jwt.decode(token, settings.secret_key, algorithms=[_ALGORITHM])

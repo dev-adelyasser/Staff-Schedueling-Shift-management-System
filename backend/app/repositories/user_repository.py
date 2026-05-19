@@ -1,68 +1,69 @@
 """
 app/repositories/user_repository.py
-────────────────────────────────────
+─────────────────────────────────────
 Data-access layer for the User entity.
 
-Repository pattern: ALL raw SQL / ORM queries are isolated here.
-Services call repository methods; they never build queries themselves.
-This enforces a clean separation that makes unit-testing trivial
-(mock the repo, test the service logic in isolation).
+Constraints:
+  - DB queries only — no domain logic, no password hashing, no JWT.
+  - SQLAlchemy 2.0 style exclusively: db.get() for PK lookups,
+    db.execute(select(...)) for filtered queries. Session.query() is banned.
+  - flush() is used instead of commit() so the caller (service layer)
+    controls the transaction boundary.
 """
 
-from sqlalchemy.orm import Session
+from datetime import datetime, timezone
+
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.models.user import User
-from app.core.validators import UserRole
 
 
-class UserRepository:
+def get_by_id(db: Session, user_id: int) -> User | None:
+    """Return the User row for the given primary key, or None."""
+    return db.get(User, user_id)
 
-    def __init__(self, db: Session) -> None:
-        self._db = db
 
-    # ── Read ──────────────────────────────────────────────────
+def get_by_email(db: Session, email: str) -> User | None:
+    """Return the User row whose email matches (case-insensitive), or None."""
+    stmt = select(User).where(User.email == email.lower())
+    return db.execute(stmt).scalars().first()
 
-    def get_by_id(self, user_id: int) -> User | None:
-        return self._db.get(User, user_id)
 
-    def get_by_email(self, email: str) -> User | None:
-        stmt = select(User).where(User.email == email.lower())
-        return self._db.scalars(stmt).first()
+def create(db: Session, user: User) -> User:
+    """Persist a fully-populated User object supplied by the caller.
 
-    def list_all(self, *, skip: int = 0, limit: int = 100) -> list[User]:
-        stmt = select(User).offset(skip).limit(limit).order_by(User.id)
-        return list(self._db.scalars(stmt).all())
+    The caller (service layer) is responsible for setting every field
+    — including hashed_password and role — before passing the object in.
+    flush() assigns the DB-generated PK without ending the transaction.
+    """
+    db.add(user)
+    db.flush()
+    return user
 
-    def list_by_role(self, role: UserRole) -> list[User]:
-        stmt = select(User).where(User.role == role).order_by(User.id)
-        return list(self._db.scalars(stmt).all())
 
-    # ── Write ─────────────────────────────────────────────────
+def update(db: Session, user: User) -> User:
+    """Flush field mutations already applied by the caller to the tracked User.
 
-    def create(self, *, email: str, full_name: str,
-               hashed_password: str, role: UserRole) -> User:
-        user = User(
-            email=email,
-            full_name=full_name,
-            hashed_password=hashed_password,
-            role=role,
-        )
-        self._db.add(user)
-        self._db.flush()   # assign ID without committing
-        return user
+    The caller sets whichever attributes need changing on the SQLAlchemy-
+    tracked object before calling this function; the repository only
+    persists those changes within the current transaction.
+    """
+    db.flush()
+    return user
 
-    def update(self, user: User, **kwargs) -> User:
-        for key, val in kwargs.items():
-            if val is not None and hasattr(user, key):
-                setattr(user, key, val)
-        self._db.flush()
-        return user
 
-    def delete(self, user: User) -> None:
-        self._db.delete(user)
-        self._db.flush()
+def soft_delete(db: Session, user_id: int) -> bool:
+    """Mark a user as deleted without removing the row (soft delete).
 
-    def exists_by_email(self, email: str) -> bool:
-        stmt = select(User.id).where(User.email == email.lower())
-        return self._db.scalars(stmt).first() is not None
+    Sets is_deleted=True and deleted_at to the current UTC timestamp.
+    Returns True when the user was found and marked deleted,
+    False when no user with that id exists.
+    """
+    user = db.get(User, user_id)
+    if user is None:
+        return False
+    user.is_deleted = True
+    user.deleted_at = datetime.now(timezone.utc)
+    db.flush()
+    return True
