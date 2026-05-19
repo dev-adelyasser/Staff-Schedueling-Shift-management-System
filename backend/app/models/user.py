@@ -1,60 +1,35 @@
-"""
-app/models/user.py
-──────────────────
-User ORM model.
+from datetime import datetime
+from enum import Enum
+from typing import TYPE_CHECKING
+from sqlalchemy import String, Boolean, DateTime, Enum as SQLEnum
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-Information Hiding rule: this file must NEVER be imported by
-any schema or router.  Only repositories and services may touch it.
-"""
+# Shared Base for models
+class Base(DeclarativeBase):
+    pass
 
-from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, Enum, String, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database import Base
-from app.core.validators import UserRole
-
+class UserRole(str, Enum):
+    ADMIN = "ADMIN"
+    MANAGER = "MANAGER"
+    STAFF = "STAFF"
 
 class User(Base):
     __tablename__ = "users"
 
-    # ── Primary key ───────────────────────────────────────────
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-
-    # ── Identity ──────────────────────────────────────────────
-    email: Mapped[str] = mapped_column(
-        String(320), unique=True, index=True, nullable=False
-    )
-    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-
-    # ── Auth (hashed – never store plaintext) ─────────────────
-    hashed_password: Mapped[str] = mapped_column(String(128), nullable=False)
-
-    # ── Role (RBAC) ───────────────────────────────────────────
-    role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="userrole", native_enum=False, length=32),
-        nullable=False,
-        default=UserRole.STAFF,
-    )
-
-    # ── Flags ─────────────────────────────────────────────────
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    # AU-02 Spec: bcrypt hashes are 60 chars; pinned to VARCHAR(72) to match exact spec limits
+    hashed_password: Mapped[str] = mapped_column(String(72), nullable=False)
+    first_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    last_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole), default=UserRole.STAFF, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    # ── Audit timestamps ──────────────────────────────────────
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
+    token_version: Mapped[int] = mapped_column(default=0, nullable=False)
+    
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # ── Relationships ─────────────────────────────────────────
-    shifts: Mapped[list["Shift"]] = relationship(  # noqa: F821
-        "Shift", back_populates="assignee", cascade="all, delete-orphan"
-    )
-
-    def __repr__(self) -> str:  # pragma: no cover
-        return f"<User id={self.id} email={self.email!r} role={self.role}>"
+    if TYPE_CHECKING:
+        from app.models.shift import Shift
+        shifts: Mapped[list["Shift"]] = relationship(back_populates="user")

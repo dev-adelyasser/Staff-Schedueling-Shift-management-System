@@ -1,68 +1,81 @@
-"""
-app/schemas/shift.py
-────────────────────
-Pydantic v2 schemas for the Shift resource.
-
-All time fields are timezone-aware datetimes.
-Padlock constraints (duration, rest period) are enforced in the
-service layer, not here, to keep schemas declarative.
-"""
-
-from __future__ import annotations
-
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, model_validator
 
-from app.core.validators import ShiftStatus, ShiftLimits
-
-
-# ══════════════════════════════════════════════════════════════
-#  Request Schemas
-# ══════════════════════════════════════════════════════════════
+def _parse_datetime(val: Any) -> datetime | None:
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, str):
+        try:
+            # Handle standard ISO formats (including trailing Z)
+            return datetime.fromisoformat(val.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 class ShiftCreate(BaseModel):
-    user_id:    int       = Field(..., gt=0)
-    title:      str       = Field(..., min_length=1, max_length=255)
+    """Spec section 10: exactly these 5 fields. User assignment is a separate endpoint."""
+    title: str
     start_time: datetime
-    end_time:   datetime
-    notes:      str | None = None
-    schedule_id: int | None = None
+    end_time: datetime
+    department_id: int
+    headcount: int = 1
 
-    @model_validator(mode="after")
-    def end_after_start(self) -> "ShiftCreate":
-        if self.end_time <= self.start_time:
-            raise ValueError("end_time must be after start_time.")
-        return self
+    @model_validator(mode="before")  # spec: mode='before' to catch errors early
+    @classmethod
+    def end_after_start(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+            
+        start_val = values.get("start_time")
+        end_val = values.get("end_time")
+        
+        start = _parse_datetime(start_val)
+        end = _parse_datetime(end_val)
+        
+        if start and end and end <= start:
+            raise ValueError("end_time must be after start_time")
+        return values
 
 
 class ShiftUpdate(BaseModel):
-    title:      str | None       = Field(None, min_length=1, max_length=255)
-    start_time: datetime | None  = None
-    end_time:   datetime | None  = None
-    notes:      str | None       = None
-    status:     ShiftStatus | None = None
-    schedule_id: int | None      = None
+    title: str | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    department_id: int | None = None
+    headcount: int | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def end_after_start(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+            
+        start_val = values.get("start_time")
+        end_val = values.get("end_time")
+        
+        start = _parse_datetime(start_val)
+        end = _parse_datetime(end_val)
+        
+        if start and end and end <= start:
+            raise ValueError("end_time must be after start_time")
+        return values
 
-class ShiftStatusUpdate(BaseModel):
-    """Dedicated schema for status-only transitions."""
-    status: ShiftStatus
-
-
-# ══════════════════════════════════════════════════════════════
-#  Response Schemas
-# ══════════════════════════════════════════════════════════════
 
 class ShiftResponse(BaseModel):
-    id:          int
-    user_id:     int
-    title:       str
-    start_time:  datetime
-    end_time:    datetime
-    notes:       str | None
-    status:      ShiftStatus
-    schedule_id: int | None
-    created_at:  datetime
-    updated_at:  datetime
+    id: int
+    title: str
+    start_time: datetime
+    end_time: datetime
+    department_id: int
+    headcount: int
+    is_deleted: bool
+    created_by: int | None
+    created_at: datetime
+    updated_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = {"from_attributes": True}
+
+
+class ShiftAssign(BaseModel):
+    """POST /shifts/{id}/assign — user assignment is separate from creation."""
+    user_id: int
