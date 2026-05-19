@@ -82,13 +82,11 @@ def upgrade() -> None:
         ),
     )
 
-    # Index used by has_overlapping_shift() — AU-04
-    op.create_index("ix_shifts_staff_id", "shifts", ["staff_id"])
+    # ix_shifts_staff_id is created in the Person-2 migration once staff_assignments
+    # replaces the old per-row staff_id column (staff_id lives in staff_assignments).
 
 
 def downgrade() -> None:
-    op.drop_index("ix_shifts_staff_id", table_name="shifts")
-
     op.drop_column("shifts", "created_by")
     op.drop_column("shifts", "headcount")
     op.drop_column("shifts", "department_id")

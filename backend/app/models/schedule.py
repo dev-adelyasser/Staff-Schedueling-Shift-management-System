@@ -32,11 +32,6 @@ class Schedule(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
-    # ── Relationships ─────────────────────────────────────────
-    shifts: Mapped[list["Shift"]] = relationship(  # noqa: F821
-        "Shift", back_populates="schedule"
-    )
-
     # ── Audit ─────────────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

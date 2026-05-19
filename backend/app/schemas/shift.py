@@ -1,81 +1,83 @@
+"""
+app/schemas/shift.py
+────────────────────
+Public schema contracts for the Shift slice.
+
+ShiftCreateSchema  — exactly 5 fields (spec §10); enforces start < end (HR-05).
+ShiftResponseSchema — exactly 7 public fields; never exposes created_by,
+                      updated_at, or is_deleted.
+"""
+
+import uuid
 from datetime import datetime
-from pydantic import BaseModel, model_validator
+from typing import Any
 
-def _parse_datetime(val: Any) -> datetime | None:
-    if isinstance(val, datetime):
-        return val
-    if isinstance(val, str):
-        try:
-            # Handle standard ISO formats (including trailing Z)
-            return datetime.fromisoformat(val.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    return None
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-class ShiftCreate(BaseModel):
-    """Spec section 10: exactly these 5 fields. User assignment is a separate endpoint."""
+
+class ShiftCreateSchema(BaseModel):
+    """POST /api/v1/shifts — exactly 5 fields (spec §10)."""
+
     title: str
     start_time: datetime
     end_time: datetime
     department_id: int
     headcount: int = 1
 
-    @model_validator(mode="before")  # spec: mode='before' to catch errors early
-    @classmethod
-    def end_after_start(cls, values: Any) -> Any:
-        if not isinstance(values, dict):
-            return values
-            
-        start_val = values.get("start_time")
-        end_val = values.get("end_time")
-        
-        start = _parse_datetime(start_val)
-        end = _parse_datetime(end_val)
-        
-        if start and end and end <= start:
-            raise ValueError("end_time must be after start_time")
-        return values
-
-
-class ShiftUpdate(BaseModel):
-    title: str | None = None
-    start_time: datetime | None = None
-    end_time: datetime | None = None
-    department_id: int | None = None
-    headcount: int | None = None
-
     @model_validator(mode="before")
     @classmethod
-    def end_after_start(cls, values: Any) -> Any:
+    def _enforce_start_before_end(cls, values: Any) -> Any:
+        """HR-05: start_time >= end_time → HTTP 422."""
         if not isinstance(values, dict):
             return values
-            
-        start_val = values.get("start_time")
-        end_val = values.get("end_time")
-        
-        start = _parse_datetime(start_val)
-        end = _parse_datetime(end_val)
-        
-        if start and end and end <= start:
-            raise ValueError("end_time must be after start_time")
+        start = values.get("start_time")
+        end = values.get("end_time")
+        if start is None or end is None:
+            return values
+        # Convert strings so the comparison works regardless of input form.
+        if isinstance(start, str):
+            start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        if isinstance(end, str):
+            end = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        if end <= start:
+            raise ValueError("end_time must be strictly after start_time")
         return values
 
+    @field_validator("headcount")
+    @classmethod
+    def _headcount_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("headcount must be >= 1")
+        return v
 
-class ShiftResponse(BaseModel):
-    id: int
+
+class ShiftResponseSchema(BaseModel):
+    """Public representation — 7 fields only (spec §10)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
     title: str
     start_time: datetime
     end_time: datetime
     department_id: int
     headcount: int
-    is_deleted: bool
-    created_by: int | None
     created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
 
 
-class ShiftAssign(BaseModel):
-    """POST /shifts/{id}/assign — user assignment is separate from creation."""
-    user_id: int
+class ShiftListResponseSchema(BaseModel):
+    """Paginated wrapper returned by GET /api/v1/shifts."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[ShiftResponseSchema]
+    total: int
+    skip: int
+    limit: int
+
+
+class BulkUploadResultSchema(BaseModel):
+    """Response for POST /api/v1/shifts/bulk-upload."""
+
+    created: list[ShiftResponseSchema]
+    errors: list[dict[str, Any]]

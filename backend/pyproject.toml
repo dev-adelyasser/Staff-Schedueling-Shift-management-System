@@ -65,7 +65,7 @@ build-backend = "hatchling.build"
 # ── Discovery ─────────────────────────────────────────────────────────────────
 # testpaths covers both the pytest-managed unit/integration suite AND the
 # Playwright E2E suite so a single `pytest` invocation runs everything.
-testpaths    = ["tests", "e2e"]
+testpaths    = ["tests", "e2e", "backend/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

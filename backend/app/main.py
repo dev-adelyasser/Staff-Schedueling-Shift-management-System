@@ -18,8 +18,8 @@ async def lifespan(app: FastAPI):
 
 def create_application() -> FastAPI:
     app = FastAPI(
-        title=settings.project_name,
-        version=settings.version,
+        title=settings.app_name,
+        version=settings.app_version,
         lifespan=lifespan,
         docs_url="/docs" if settings.app_env != "production" else None,
         redoc_url="/redoc" if settings.app_env != "production" else None,

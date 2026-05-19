@@ -1,17 +1,34 @@
 """
 app/schemas/__init__.py
-───────────────────────
-Re-exports all public schema contracts.
-Routers import from here; never from individual schema modules.
+──────────────────────
+Public schema registry — routers import from here.
 """
 
 from app.schemas.user import (  # noqa: F401
-    UserCreate, UserUpdate, UserPublic, UserResponse,
-    TokenResponse, LoginRequest,
+    UserCreateSchema,
+    UserUpdateSchema,
+    UserResponseSchema,
+)
+from app.schemas.auth import (  # noqa: F401
+    LoginRequest,
+    TokenSchema,
 )
 from app.schemas.shift import (  # noqa: F401
-    ShiftCreate, ShiftUpdate, ShiftStatusUpdate, ShiftResponse,
+    ShiftCreateSchema,
+    ShiftResponseSchema,
 )
-from app.schemas.schedule import (  # noqa: F401
-    ScheduleCreate, ScheduleUpdate, ScheduleResponse,
+from app.schemas.assignment import (  # noqa: F401
+    AssignmentCreateSchema,
+    AssignmentResponseSchema,
+)
+from app.schemas.swap import (  # noqa: F401
+    SwapRequestCreateSchema,
+    SwapRequestResponseSchema,
+)
+from app.schemas.availability import (  # noqa: F401
+    AvailabilityCreateSchema,
+    AvailabilityResponseSchema,
+)
+from app.schemas.attendance import (  # noqa: F401
+    AttendanceResponseSchema,
 )

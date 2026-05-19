@@ -1,53 +1,43 @@
 """
 app/models/shift.py
 ───────────────────
-Shift ORM model.  A shift represents a single scheduled work block
-assigned to one staff member.
+Shift ORM model — spec §10 (10 internal fields, UUID PK, never exposed raw).
+
+Columns (INTERNAL — never returned past the service layer):
+  id, title, start_time, end_time, department_id, headcount,
+  created_at, updated_at, created_by, is_deleted
 """
 
+import uuid
 from datetime import datetime
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text, func
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, func, text
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
-from app.core.validators import ShiftStatus
 
 
 class Shift(Base):
     __tablename__ = "shifts"
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
-
-    # ── Who is working ────────────────────────────────────────
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    assignee: Mapped["User"] = relationship(  # noqa: F821
-        "User", back_populates="shifts"
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
     )
 
-    # ── When ──────────────────────────────────────────────────
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    end_time: Mapped[datetime]   = mapped_column(DateTime(timezone=True), nullable=False)
+    end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    department_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    headcount: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
-    # ── Metadata ──────────────────────────────────────────────
-    title: Mapped[str]          = mapped_column(String(255), nullable=False)
-    notes: Mapped[str | None]   = mapped_column(Text, nullable=True)
-    status: Mapped[ShiftStatus] = mapped_column(
-        Enum(ShiftStatus, name="shiftstatus", native_enum=False, length=32),
-        nullable=False,
-        default=ShiftStatus.DRAFT,
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
-    # ── Which schedule this shift belongs to (optional) ───────
-    schedule_id: Mapped[int | None] = mapped_column(
-        ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    schedule: Mapped["Schedule"] = relationship(  # noqa: F821
-        "Schedule", back_populates="shifts"
-    )
-
-    # ── Audit ─────────────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -55,5 +45,10 @@ class Shift(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
+    # ── Relationships ──────────────────────────────────────────────────────
+    assignments: Mapped[list["StaffAssignment"]] = relationship(  # noqa: F821
+        "StaffAssignment", back_populates="shift", cascade="all, delete-orphan"
+    )
+
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<Shift id={self.id} user_id={self.user_id} status={self.status}>"
+        return f"<Shift id={self.id} title={self.title!r}>"

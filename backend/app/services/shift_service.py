@@ -1,10 +1,35 @@
-from datetime import datetime, timezone
+"""
+app/services/shift_service.py
+──────────────────────────────
+Business logic for the Shift slice.
 
+Contracts:
+  - Every method converts ORM → schema before returning (DetachedInstanceError prevention).
+  - Audit log is written in the SAME flush cycle as the write (AU-07).
+  - check_overlap() → single DB round-trip via AssignmentRepository (AU-04).
+  - 503 on OperationalError is handled by the exception middleware in main.py;
+    services raise the raw SQLAlchemy error so the handler can inspect it.
+"""
+
+import csv
+import io
+import uuid
+from datetime import datetime
+from typing import Any
+
+import sqlalchemy.exc
 from sqlalchemy.orm import Session
 
-from app.models.user import UserRole
+from app.models.audit_log import AuditActionType
+from app.repositories.assignment_repository import AssignmentRepository
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.shift_repository import ShiftRepository
-from app.schemas.shift import ShiftCreate, ShiftResponse, ShiftUpdate
+from app.schemas.shift import (
+    BulkUploadResultSchema,
+    ShiftCreateSchema,
+    ShiftListResponseSchema,
+    ShiftResponseSchema,
+)
 
 
 class ShiftConflictError(Exception):
@@ -18,169 +43,141 @@ class ShiftNotFoundError(Exception):
 class ShiftService:
     def __init__(self, db: Session) -> None:
         self._db = db
-        self._repo = ShiftRepository(db)
+        self._shifts = ShiftRepository(db)
+        self._assignments = AssignmentRepository(db)
+        self._audit = AuditLogRepository(db)
 
+    # ── Queries ────────────────────────────────────────────────────────── #
 
-    def list_shifts(self, *, skip: int = 0, limit: int = 100) -> list[ShiftResponse]:
-        shifts = self._repo.list(skip=skip, limit=limit)
-        return [ShiftResponse.model_validate(s) for s in shifts]
-
-    def get_by_id(self, shift_id: int) -> ShiftResponse | None:
-        shift = self._repo.get(shift_id)
+    def get_shift(self, shift_id: uuid.UUID) -> ShiftResponseSchema:
+        shift = self._shifts.get(shift_id)
         if shift is None or shift.is_deleted:
-            return None
-        return ShiftResponse.model_validate(shift)
+            raise ShiftNotFoundError(str(shift_id))
+        return ShiftResponseSchema.model_validate(shift)
 
+    def list_shifts(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        department_id: int | None = None,
+    ) -> ShiftListResponseSchema:
+        rows, total = self._shifts.list(
+            skip=skip, limit=limit, department_id=department_id
+        )
+        return ShiftListResponseSchema(
+            items=[ShiftResponseSchema.model_validate(r) for r in rows],
+            total=total,
+            skip=skip,
+            limit=limit,
+        )
+
+    # ── Create ─────────────────────────────────────────────────────────── #
 
     def create_shift(
         self,
-        payload: ShiftCreate,
+        payload: ShiftCreateSchema,
         *,
         actor_id: int,
-        actor_role: UserRole,
-    ) -> ShiftResponse:
-        # FR-02 / FR-07: overlap check before writing
-        if self._check_overlap(payload.start_time, payload.end_time):
-            raise ShiftConflictError("Schedule conflict detected")
+    ) -> ShiftResponseSchema:
+        shift = self._shifts.create(payload, created_by=actor_id)
 
-        shift = self._repo.create(payload, created_by=actor_id)
-
-        # AU-07 / FR-05: audit log in same transaction
-        self._write_audit(
+        # AU-07: audit log in the SAME transaction as the INSERT
+        self._audit.record(
             actor_id=actor_id,
-            action="CREATE",
-            target_id=shift.id,
-            before=None,
-            after=self._shift_dict(shift),
-        )
-
-        return ShiftResponse.model_validate(shift)
-
-    def update_shift(
-        self,
-        shift_id: int,
-        payload: ShiftUpdate,
-        *,
-        actor_id: int,
-    ) -> ShiftResponse:
-        shift = self._repo.get(shift_id)
-        if shift is None or shift.is_deleted:
-            raise ShiftNotFoundError(shift_id)
-
-        before = self._shift_dict(shift)
-
-        # Re-check overlap if times are being changed
-        new_start = payload.start_time or shift.start_time
-        new_end = payload.end_time or shift.end_time
-        if self._check_overlap(new_start, new_end, exclude_id=shift_id):
-            raise ShiftConflictError("Schedule conflict detected")
-
-        shift = self._repo.update(shift, payload)
-
-        self._write_audit(
-            actor_id=actor_id,
-            action="UPDATE",
-            target_id=shift.id,
-            before=before,
-            after=self._shift_dict(shift),
-        )
-
-        return ShiftResponse.model_validate(shift)
-
-def delete_shift(self, shift_id: int, *, actor_id: int, actor_role: UserRole) -> None:
-        shift = self._repo.get(shift_id)
-        if shift is None or shift.is_deleted:
-            raise ShiftNotFoundError(shift_id)
-
-        before = self._shift_dict(shift)
-
-        # Spec security checklist: soft delete only — no hard DELETEs on shift records
-        self._repo.soft_delete(shift)
-
-        self._write_audit(
-            actor_id=actor_id,   # Fix: Record the actual user who deleted the shift
-            action="DELETE",
-            target_id=shift_id,
-            before=before,
-            after=None,
-        )
-    def assign_shift(
-        self,
-        shift_id: int,
-        user_id: int,
-        *,
-        actor_id: int,
-    ) -> ShiftResponse:
-        shift = self._repo.get(shift_id)
-        if shift is None or shift.is_deleted:
-            raise ShiftNotFoundError(shift_id)
-
-        # Check overlap for the specific user being assigned
-        if self._check_overlap(shift.start_time, shift.end_time, user_id=user_id):
-            raise ShiftConflictError(f"Conflict for user_id {user_id}")
-
-        before = self._shift_dict(shift)
-        shift = self._repo.assign(shift, user_id=user_id)
-
-        self._write_audit(
-            actor_id=actor_id,
-            action="ASSIGN",
-            target_id=shift.id,
-            before=before,
-            after=self._shift_dict(shift),
-        )
-
-        return ShiftResponse.model_validate(shift)
-
-    # ------------------------------------------------------------------ #
-    # Private helpers
-    # ------------------------------------------------------------------ #
-
-    def _check_overlap(
-        self,
-        start: datetime,
-        end: datetime,
-        *,
-        user_id: int | None = None,
-        exclude_id: int | None = None,
-    ) -> bool:
-        """
-        AU-04 closed-interval predicate:
-            existing.start_time < new.end_time AND existing.end_time > new.start_time
-        """
-        return self._repo.has_overlapping_shift(
-            start, end, user_id=user_id, exclude_id=exclude_id
-        )
-
-    def _write_audit(
-        self,
-        *,
-        actor_id: int | None,
-        action: str,
-        target_id: int,
-        before: dict | None,
-        after: dict | None,
-    ) -> None:
-        """FR-05 / AU-07: write audit log entry inside the current transaction."""
-        from app.models.audit_log import AuditLog  # local import avoids circular deps
-
-        entry = AuditLog(
-            actor_id=actor_id,
-            action_type=action,
+            action_type=AuditActionType.CREATE,
             target_table="shifts",
-            target_id=target_id,
-            before_state=before,
-            after_state=after,
-            occurred_at=datetime.now(timezone.utc),
+            target_id=shift.id,
+            before_state=None,
+            after_state=self._shift_snapshot(shift),
         )
-        self._db.add(entry)
-        # flush so the entry is part of the same transaction commit
-        self._db.flush()
+
+        return ShiftResponseSchema.model_validate(shift)
+
+    # ── Assign staff to shift ──────────────────────────────────────────── #
+
+    def assign_staff(
+        self,
+        shift_id: uuid.UUID,
+        staff_id: int,
+        *,
+        actor_id: int,
+    ) -> ShiftResponseSchema:
+        shift = self._shifts.get(shift_id)
+        if shift is None or shift.is_deleted:
+            raise ShiftNotFoundError(str(shift_id))
+
+        # AU-04: overlap check — single DB round-trip, filtered on staff_id index
+        if self._assignments.has_overlapping_assignment(
+            staff_id, shift.start_time, shift.end_time,
+            exclude_shift_id=shift_id,
+        ):
+            raise ShiftConflictError(
+                f"Staff {staff_id} already has an overlapping shift assignment"
+            )
+
+        before = self._shift_snapshot(shift)
+        assignment = self._assignments.create(
+            shift_id, staff_id, assigned_by=actor_id
+        )
+
+        self._audit.record(
+            actor_id=actor_id,
+            action_type=AuditActionType.UPDATE,
+            target_table="shifts",
+            target_id=shift_id,
+            before_state=before,
+            after_state={**before, "assigned_staff_id": staff_id},
+        )
+
+        return ShiftResponseSchema.model_validate(shift)
+
+    # ── Bulk CSV upload ────────────────────────────────────────────────── #
+
+    def bulk_upload(
+        self,
+        csv_content: str,
+        *,
+        actor_id: int,
+    ) -> BulkUploadResultSchema:
+        """
+        POST /api/v1/shifts/bulk-upload.
+
+        CSV columns (in order): title, start_time, end_time, department_id, headcount
+        Returns 201 (all created), 207 (partial), 400 (unparseable CSV), 422 (empty).
+        HTTP status selection is the router's responsibility.
+        """
+        created: list[ShiftResponseSchema] = []
+        errors: list[dict[str, Any]] = []
+
+        try:
+            reader = csv.DictReader(io.StringIO(csv_content))
+            rows = list(reader)
+        except Exception as exc:
+            raise ValueError(f"Could not parse CSV: {exc}") from exc
+
+        for row_idx, raw in enumerate(rows, start=2):  # row 1 = header
+            try:
+                payload = ShiftCreateSchema(
+                    title=raw["title"].strip(),
+                    start_time=raw["start_time"].strip(),
+                    end_time=raw["end_time"].strip(),
+                    department_id=int(raw["department_id"]),
+                    headcount=int(raw.get("headcount", 1)),
+                )
+                result = self.create_shift(payload, actor_id=actor_id)
+                created.append(result)
+            except Exception as exc:
+                errors.append({"row": row_idx, "data": dict(raw), "error": str(exc)})
+
+        return BulkUploadResultSchema(created=created, errors=errors)
+
+    # ── Private ────────────────────────────────────────────────────────── #
 
     @staticmethod
-    def _shift_dict(shift) -> dict:
+    def _shift_snapshot(shift) -> dict[str, Any]:
         return {
-            "id": shift.id,
+            "id": str(shift.id),
             "title": shift.title,
             "start_time": shift.start_time.isoformat(),
             "end_time": shift.end_time.isoformat(),
